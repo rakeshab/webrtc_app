@@ -1,4 +1,3 @@
-
 "use strict";
 
 var myHostname = window.location.hostname;
@@ -131,15 +130,23 @@ function setDefaultCodec(mLine, payload) {
 }
 
 
+//function updateBandwidthRestriction(sdp, bandwidth) {
+//  if (sdp.indexOf('b=AS:') === -1) {
+//    // insert b=AS after c= line.
+//    sdp = sdp.replace(/c=IN IP4 (.*)\r\n/,
+//                      'c=IN IP4 $1\r\nb=AS:' + bandwidth + '\r\n');
+//  } else {
+//    sdp = sdp.replace(/b=AS:(.*)\r\n/, 'b=AS:' + bandwidth + '\r\n');
+//  }
+//  return sdp;
+//}
+
 function updateBandwidthRestriction(sdp, bandwidth) {
-  if (sdp.indexOf('b=AS:') === -1) {
-    // insert b=AS after c= line.
-    sdp = sdp.replace(/c=IN IP4 (.*)\r\n/,
-                      'c=IN IP4 $1\r\nb=AS:' + bandwidth + '\r\n');
-  } else {
-    sdp = sdp.replace(/b=AS:(.*)\r\n/, 'b=AS:' + bandwidth + '\r\n');
-  }
-  return sdp;
+  var sdp = setBAS(sdp, {video: bandwidth});
+  return setVideoBitrates(sdp, {
+        min: bandwidth,
+        max: bandwidth
+    });
 }
 
 function setVideoConstraints() {
@@ -150,19 +157,19 @@ function setVideoConstraints() {
                                     height: {exact: 1080}};
     }
     if(resolution === 'high') {
-        mediaConstraints.video = { facingMode: "user", frameRate: { min: 20, ideal: 30, max: 30 }, width: {exact: 1280},
+        mediaConstraints.video = { facingMode: "user", frameRate: { min: 20, ideal: 25, max: 25 }, width: {exact: 1280},
                                         height: {exact: 720} };
     }
     if(resolution === 'medium') {
-        mediaConstraints.video = { facingMode: "user", frameRate: { min: 20, ideal: 25, max: 30 }, width: {exact: 640},
+        mediaConstraints.video = { facingMode: "user", frameRate: { min: 20, ideal: 25, max: 25 }, width: {exact: 640},
                                         height: {exact: 480} };
     }
     if(resolution === 'low') {
-        mediaConstraints.video = { facingMode: "user", frameRate: { min: 10, ideal: 15, max: 30 }, width: {exact: 320},
+        mediaConstraints.video = { facingMode: "user", frameRate: { min: 10, ideal: 15, max: 25 }, width: {exact: 320},
                                         height: {exact: 240} };
     }
     if(resolution === 'v-low') {
-        mediaConstraints.video = { facingMode: "user", frameRate: { min: 10, ideal: 15, max: 30 }, width: {exact: 160},
+        mediaConstraints.video = { facingMode: "user", frameRate: { min: 10, ideal: 15, max: 25 }, width: {exact: 160},
                                     height: {exact: 120} };
     }
     trace('using media constraints: ');
@@ -522,6 +529,7 @@ function start(onMediaInit) {
   trace('Requesting local stream');
   trace('using media callback ' + onMediaInit);
   setVideoConstraints();
+  startStats();
   navigator.mediaDevices.getUserMedia(mediaConstraints)
   .then(function(stream) {
       gotStream(stream);
@@ -916,3 +924,126 @@ function closeVideoCall() {
   document.getElementById("hangup-button").disabled = true;
   disableChat();
 }
+
+//tribute to https://www.webrtc-experiment.com/RTCMultiConnection/bandwidth.html?audio=30&video=256
+function setBAS(sdp, bandwidth) {
+        if (!!navigator.mozGetUserMedia || !bandwidth) {
+            return sdp;
+        }
+
+        // if screen; must use at least 300kbs
+        if (bandwidth.screen) {
+            bandwidth.screen = bandwidth.screen < 300 ? 300: bandwidth.screen;
+            sdp = sdp.replace(/b=AS([^\r\n]+\r\n)/g, '');
+            sdp = sdp.replace(/a=mid:video\r\n/g, 'a=mid:video\r\nb=AS:' + bandwidth.screen + '\r\n');
+        }
+
+        // remove existing bandwidth lines
+        if (bandwidth.audio || bandwidth.video || bandwidth.data) {
+            sdp = sdp.replace(/b=AS([^\r\n]+\r\n)/g, '');
+        }
+
+        if (bandwidth.audio) {
+            sdp = sdp.replace(/a=mid:audio\r\n/g, 'a=mid:audio\r\nb=AS:' + bandwidth.audio + '\r\n');
+        }
+        trace('using video bandwidth: ' + bandwidth.video);
+        if (bandwidth.video) {
+            sdp = sdp.replace(/a=mid:video\r\n/g, 'a=mid:video\r\nb=AS:' +  bandwidth.video + '\r\n');
+        }
+
+        return sdp;
+}
+
+function setVideoBitrates(sdp, params) {
+        params = params || {};
+        var xgoogle_min_bitrate = params.min;
+        var xgoogle_max_bitrate = params.max;
+
+        var sdpLines = sdp.split('\r\n');
+        var codecSelector = document.querySelector('select#codec');
+        var codec = codecSelector.options[codecSelector.selectedIndex].value;
+
+        // codec
+        var codecIndex = findLine(sdpLines, 'a=rtpmap', codec +'/90000');
+        var codecPayload;
+        if (codecIndex) {
+            codecPayload = getCodecPayloadType(sdpLines[codecIndex]);
+        }
+
+        if (!codecPayload) {
+            return sdp;
+        }
+
+        var rtxIndex = findLine(sdpLines, 'a=rtpmap', 'rtx/90000');
+        var rtxPayload;
+        if (rtxIndex) {
+            rtxPayload = getCodecPayloadType(sdpLines[rtxIndex]);
+        }
+
+        if (!rtxIndex) {
+            return sdp;
+        }
+
+        var rtxFmtpLineIndex = findLine(sdpLines, 'a=fmtp:' + rtxPayload.toString());
+        if (rtxFmtpLineIndex !== null) {
+            var appendrtxNext = '\r\n';
+            appendrtxNext += 'a=fmtp:' + codecPayload + ' x-google-min-bitrate=' + (xgoogle_min_bitrate || '228') + '; x-google-max-bitrate=' + (xgoogle_max_bitrate || '228');
+            sdpLines[rtxFmtpLineIndex] = sdpLines[rtxFmtpLineIndex].concat(appendrtxNext);
+            sdp = sdpLines.join('\r\n');
+        }
+
+        return sdp;
+}
+
+
+var bytesPrev;
+var timestampPrev;
+
+//tribute to https://github.com/webrtc/samples/blob/gh-pages/src/content/peerconnection/constraints/js/main.js
+function startStats() {
+    bytesPrev = 0;
+    timestampPrev = 0;   
+    var bitrateSpan = document.getElementById('bitrateSpan');
+    // Display statistics
+    setInterval(function() {
+          if (myPeerConnection && myPeerConnection.getRemoteStreams()[0]) {
+            myPeerConnection.getStats(null, function(results) {
+              trace('present reports: ' + JSON.stringify(results));
+              // calculate video bitrate
+              Object.keys(results).forEach(function(result) {
+                var report = results[result];
+                var now = report.timestamp;
+
+                var bitrate;
+                if (report['type'] === 'inboundrtp' && report['mediaType'] === 'video') {
+                  // firefox calculates the bitrate for us
+                  // https://bugzilla.mozilla.org/show_bug.cgi?id=951496
+                  bitrate = Math.floor(report['bitrateMean'] / 1024);
+                } else if (report['type'] === 'ssrc' && report['bytesReceived'] &&
+                     report['googFrameHeightReceived']) {
+                  // chrome does not so we need to do it ourselves
+                  var bytes = report['bytesReceived'];
+                  if (timestampPrev) {
+                    bitrate = 8 * (bytes - bytesPrev) / (now - timestampPrev);
+                    bitrate = Math.floor(bitrate);
+                  }
+                  bytesPrev = bytes;
+                  timestampPrev = now;
+                }
+                if (!bitrate) {
+                  bitrate = "0";
+                }
+                bitrate += ' kbits/sec';
+                bitrateSpan.innerHTML = bitrate;
+              });
+
+            }, function(err) {
+              console.log(err);
+            });
+          } else {
+            console.log('Not connected yet');
+          }
+        }, 1000);
+}
+
+
